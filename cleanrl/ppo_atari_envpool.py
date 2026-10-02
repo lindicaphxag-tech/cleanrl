@@ -149,6 +149,29 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
+def compute_gae(rewards, dones, values, next_done, next_value, gamma, gae_lambda):
+    """Compute GAE while excluding EnvPool dummy reset transitions."""
+    advantages = torch.zeros_like(rewards)
+    lastgaelam = torch.zeros_like(next_done)
+    for t in reversed(range(rewards.shape[0])):
+        if t == rewards.shape[0] - 1:
+            nextnonterminal = 1.0 - next_done
+            nextvalues = next_value
+        else:
+            nextnonterminal = 1.0 - dones[t + 1]
+            nextvalues = values[t + 1]
+        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+        valid_transition = 1.0 - dones[t]
+        lastgaelam = (delta + gamma * gae_lambda * nextnonterminal * lastgaelam) * valid_transition
+        advantages[t] = lastgaelam
+    return advantages
+
+
+def _valid_transition_indices(dones):
+    """Return flattened indices for real EnvPool transitions, excluding dummy resets."""
+    valid = (1.0 - dones).reshape(-1).bool()
+    return np.flatnonzero(valid.cpu().numpy())
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -248,18 +271,10 @@ if __name__ == "__main__":
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            next_value = agent.get_value(next_obs).reshape(-1)
+            advantages = compute_gae(
+                rewards, dones, values, next_done, next_value, args.gamma, args.gae_lambda
+            )
             returns = advantages + values
 
         # flatten the batch
@@ -270,12 +285,16 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        # Optimizing the policy and value network. EnvPool returns a terminal
+        # observation before resetting on the following step; that following
+        # terminal-to-reset step is a dummy transition and must not train PPO.
+        b_inds = _valid_transition_indices(dones)
+        if len(b_inds) == 0:
+            continue
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
+            for start in range(0, len(b_inds), args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
@@ -324,7 +343,7 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+        y_pred, y_true = b_values[b_inds].cpu().numpy(), b_returns[b_inds].cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
