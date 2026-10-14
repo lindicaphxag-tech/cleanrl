@@ -15,6 +15,8 @@ import tyro
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
+
 
 @dataclass
 class Args:
@@ -270,12 +272,15 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        # A stored done[t] marks the previous real terminal transition.
+        # EnvPool's t-th transition is only an automatic-reset dummy jump,
+        # not a valid action-bearing MDP sample. Keep the true terminal
+        # transition at t-1: GAE already cuts its trace at dones[t].
+        b_inds = valid_transition_indices(dones.cpu().numpy())
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
+            for start in range(0, len(b_inds), args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
@@ -291,7 +296,7 @@ if __name__ == "__main__":
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std(unbiased=False) + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
