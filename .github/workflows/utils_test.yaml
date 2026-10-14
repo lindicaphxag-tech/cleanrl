@@ -29,4 +29,8 @@ jobs:
       - name: Downgrade setuptools
         run: uv pip install setuptools==59.5.0
       - name: Run utils tests
-        run: uv run pytest tests/test_utils.py
+        run: |
+          uv run pytest -q tests/test_utils.py \
+            tests/test_envpool_dummy_transition_mask.py \
+            tests/test_envpool_rnd_intrinsic_gae.py \
+            tests/test_envpool_rnd_reward_filter.py

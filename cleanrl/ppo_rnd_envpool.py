@@ -17,6 +17,12 @@ from gym.wrappers.normalize import RunningMeanStd
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
+from cleanrl_utils.envpool_rnd_gae import (
+    discounted_intrinsic_returns,
+    intrinsic_gae_skip_reset_dummy,
+)
+
 
 @dataclass
 class Args:
@@ -234,11 +240,23 @@ class RewardForwardFilter:
         self.rewems = None
         self.gamma = gamma
 
-    def update(self, rews):
+    def update(self, rews, valid_mask=None):
+        # Preserve existing behaviour for non-EnvPool callers. With a mask,
+        # do not discount or update the running filter at dummy reset slots:
+        # they are not real transitions and have no intrinsic reward.
+        if valid_mask is None:
+            if self.rewems is None:
+                self.rewems = rews
+            else:
+                self.rewems = self.rewems * self.gamma + rews
+            return self.rewems
+        rews = np.asarray(rews)
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if valid_mask.shape != rews.shape:
+            raise ValueError("RND filter valid-mask shape must match rewards")
         if self.rewems is None:
-            self.rewems = rews
-        else:
-            self.rewems = self.rewems * self.gamma + rews
+            self.rewems = np.zeros_like(rews)
+        self.rewems = np.where(valid_mask, self.rewems * self.gamma + rews, self.rewems)
         return self.rewems
 
 
@@ -387,13 +405,22 @@ if __name__ == "__main__":
                     )
                     writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
 
-        curiosity_reward_per_env = np.array(
-            [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
+        # EnvPool has a dummy reset transition after an actual done. The
+        # dummy's RND prediction error is NOT an intrinsic reward. Exclude
+        # it from the discount filter, reward RMS and all PPO objective terms.
+        valid_inds = valid_transition_indices(dones.cpu().numpy())
+        real_transition_mask = ~dones.cpu().numpy().astype(bool)  # [time, env]
+        curiosity_rewards.masked_fill_(dones.bool(), 0.0)
+        # RND's reward filter is a per-ENVIRONMENT recurrence in TIME.
+        # Never recurse across environment IDs (the old .T loop did so).
+        curiosity_reward_by_step = discounted_intrinsic_returns(
+            discounted_reward, curiosity_rewards.detach().cpu().numpy(), real_transition_mask
         )
+        actual_returns = curiosity_reward_by_step[real_transition_mask]
         mean, std, count = (
-            np.mean(curiosity_reward_per_env),
-            np.std(curiosity_reward_per_env),
-            len(curiosity_reward_per_env),
+            np.mean(actual_returns),
+            np.std(actual_returns),
+            len(actual_returns),
         )
         reward_rms.update_from_moments(mean, std**2, count)
 
@@ -404,28 +431,36 @@ if __name__ == "__main__":
             next_value_ext, next_value_int = agent.get_value(next_obs)
             next_value_ext, next_value_int = next_value_ext.reshape(1, -1), next_value_int.reshape(1, -1)
             ext_advantages = torch.zeros_like(rewards, device=device)
-            int_advantages = torch.zeros_like(curiosity_rewards, device=device)
             ext_lastgaelam = 0
-            int_lastgaelam = 0
             for t in reversed(range(args.num_steps)):
+                # Ext reward terminates at the *real* last action, never at
+                # the following EnvPool auto-reset dummy transition.
+                dummy_step = dones[t].bool()
                 if t == args.num_steps - 1:
                     ext_nextnonterminal = 1.0 - next_done
-                    int_nextnonterminal = 1.0
                     ext_nextvalues = next_value_ext
-                    int_nextvalues = next_value_int
                 else:
                     ext_nextnonterminal = 1.0 - dones[t + 1]
-                    int_nextnonterminal = 1.0
                     ext_nextvalues = ext_values[t + 1]
-                    int_nextvalues = int_values[t + 1]
                 ext_delta = rewards[t] + args.gamma * ext_nextvalues * ext_nextnonterminal - ext_values[t]
-                int_delta = curiosity_rewards[t] + args.int_gamma * int_nextvalues * int_nextnonterminal - int_values[t]
-                ext_advantages[t] = ext_lastgaelam = (
-                    ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam
+                ext_lastgaelam = torch.where(
+                    dummy_step,
+                    torch.zeros_like(ext_delta),
+                    ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam,
                 )
-                int_advantages[t] = int_lastgaelam = (
-                    int_delta + args.int_gamma * args.gae_lambda * int_nextnonterminal * int_lastgaelam
-                )
+                ext_advantages[t] = ext_lastgaelam
+
+            # Intrinsic rewards remain continuing across real terminals, but
+            # EnvPool's *dummy* reset command is neither reward-bearing nor
+            # a separate discount step. Build GAE on valid transitions only.
+            int_advantages = intrinsic_gae_skip_reset_dummy(
+                curiosity_rewards,
+                int_values,
+                dones,
+                next_value_int,
+                args.int_gamma,
+                args.gae_lambda,
+            )
             ext_returns = ext_advantages + ext_values
             int_returns = int_advantages + int_values
 
@@ -441,10 +476,11 @@ if __name__ == "__main__":
 
         b_advantages = b_int_advantages * args.int_coef + b_ext_advantages * args.ext_coef
 
-        obs_rms.update(b_obs[:, 3, :, :].reshape(-1, 1, 84, 84).cpu().numpy())
+        # Do not update curiosity normalisation with fake reset transitions.
+        obs_rms.update(b_obs[valid_inds, 3, :, :].reshape(-1, 1, 84, 84).cpu().numpy())
 
         # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        b_inds = valid_inds
 
         rnd_next_obs = (
             (
@@ -456,7 +492,7 @@ if __name__ == "__main__":
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
+            for start in range(0, len(b_inds), args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
@@ -484,7 +520,7 @@ if __name__ == "__main__":
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std(unbiased=False) + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
