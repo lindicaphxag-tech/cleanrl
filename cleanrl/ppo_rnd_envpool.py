@@ -18,7 +18,10 @@ from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
-from cleanrl_utils.envpool_rnd_gae import discounted_intrinsic_returns, intrinsic_gae_skip_reset_dummy
+from cleanrl_utils.envpool_rnd_gae import (
+    discounted_intrinsic_returns,
+    intrinsic_gae_skip_reset_dummy,
+)
 
 
 @dataclass
