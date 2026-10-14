@@ -18,7 +18,7 @@ from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
-from cleanrl_utils.envpool_rnd_gae import intrinsic_gae_skip_reset_dummy
+from cleanrl_utils.envpool_rnd_gae import discounted_intrinsic_returns, intrinsic_gae_skip_reset_dummy
 
 
 @dataclass
@@ -406,15 +406,14 @@ if __name__ == "__main__":
         # dummy's RND prediction error is NOT an intrinsic reward. Exclude
         # it from the discount filter, reward RMS and all PPO objective terms.
         valid_inds = valid_transition_indices(dones.cpu().numpy())
-        real_transition_mask = ~dones.cpu().numpy().astype(bool).T
+        real_transition_mask = ~dones.cpu().numpy().astype(bool)  # [time, env]
         curiosity_rewards.masked_fill_(dones.bool(), 0.0)
-        curiosity_reward_per_env = np.array(
-            [
-                discounted_reward.update(reward_per_step, valid_mask=valid_step)
-                for reward_per_step, valid_step in zip(curiosity_rewards.cpu().data.numpy().T, real_transition_mask)
-            ]
+        # RND's reward filter is a per-ENVIRONMENT recurrence in TIME.
+        # Never recurse across environment IDs (the old .T loop did so).
+        curiosity_reward_by_step = discounted_intrinsic_returns(
+            discounted_reward, curiosity_rewards.detach().cpu().numpy(), real_transition_mask
         )
-        actual_returns = curiosity_reward_per_env[real_transition_mask]
+        actual_returns = curiosity_reward_by_step[real_transition_mask]
         mean, std, count = (
             np.mean(actual_returns),
             np.std(actual_returns),
