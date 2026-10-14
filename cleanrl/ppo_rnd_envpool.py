@@ -18,6 +18,7 @@ from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
+from cleanrl_utils.envpool_rnd_gae import intrinsic_gae_skip_reset_dummy
 
 
 @dataclass
@@ -406,37 +407,31 @@ if __name__ == "__main__":
             next_value_ext, next_value_int = agent.get_value(next_obs)
             next_value_ext, next_value_int = next_value_ext.reshape(1, -1), next_value_int.reshape(1, -1)
             ext_advantages = torch.zeros_like(rewards, device=device)
-            int_advantages = torch.zeros_like(curiosity_rewards, device=device)
             ext_lastgaelam = 0
-            int_lastgaelam = 0
             for t in reversed(range(args.num_steps)):
-                # EnvPool's stored dones[t] indicates a terminal observation
-                # whose action is an automatic-reset *dummy* transition. Skip
-                # its curiosity reward and preserve the intrinsic GAE carry.
-                # For intrinsic value bootstrapping, jump to the next genuine
-                # state, not the dummy observation (which may have arbitrary V).
+                # Ext reward terminates at the *real* last action, never at
+                # the following EnvPool auto-reset dummy transition.
                 dummy_step = dones[t].bool()
                 if t == args.num_steps - 1:
                     ext_nextnonterminal = 1.0 - next_done
                     ext_nextvalues = next_value_ext
-                    int_nextvalues = next_value_int
                 else:
                     ext_nextnonterminal = 1.0 - dones[t + 1]
                     ext_nextvalues = ext_values[t + 1]
-                    after_dummy_value = int_values[t + 2] if t + 2 < args.num_steps else next_value_int
-                    int_nextvalues = torch.where(dones[t + 1].bool(), after_dummy_value, int_values[t + 1])
                 ext_delta = rewards[t] + args.gamma * ext_nextvalues * ext_nextnonterminal - ext_values[t]
-                int_delta = curiosity_rewards[t] + args.int_gamma * int_nextvalues - int_values[t]
                 ext_lastgaelam = torch.where(
                     dummy_step, torch.zeros_like(ext_delta),
                     ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam,
                 )
-                int_lastgaelam = torch.where(
-                    dummy_step, int_lastgaelam,
-                    int_delta + args.int_gamma * args.gae_lambda * int_lastgaelam,
-                )
                 ext_advantages[t] = ext_lastgaelam
-                int_advantages[t] = torch.where(dummy_step, torch.zeros_like(int_delta), int_lastgaelam)
+
+            # Intrinsic rewards remain continuing across real terminals, but
+            # EnvPool's *dummy* reset command is neither reward-bearing nor
+            # a separate discount step. Build GAE on valid transitions only.
+            int_advantages = intrinsic_gae_skip_reset_dummy(
+                curiosity_rewards, int_values, dones, next_value_int,
+                args.int_gamma, args.gae_lambda,
+            )
             ext_returns = ext_advantages + ext_values
             int_returns = int_advantages + int_values
 
