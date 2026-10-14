@@ -26,4 +26,4 @@ jobs:
       - name: Validate source syntax and 400 scalar reference trajectory comparisons
         run: |
           python -m py_compile cleanrl/ppo_rnd_envpool.py cleanrl_utils/envpool_rnd_gae.py
-          python -m pytest -q tests/test_envpool_dummy_transition_mask.py tests/test_envpool_rnd_intrinsic_gae.py
+          python -m pytest -q tests/test_envpool_dummy_transition_mask.py tests/test_envpool_rnd_intrinsic_gae.py tests/test_envpool_rnd_reward_filter.py
