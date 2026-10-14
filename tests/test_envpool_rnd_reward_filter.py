@@ -112,9 +112,7 @@ def test_discounted_rewards_equivariant_to_environment_permutation():
     valid = rng.integers(0, 2, size=(13, 5)).astype(bool)
     permutation = np.array([4, 1, 3, 0, 2])
     plain = discounted_intrinsic_returns(get_source_reward_filter()(0.8), reward, valid)
-    permuted = discounted_intrinsic_returns(
-        get_source_reward_filter()(0.8), reward[:, permutation], valid[:, permutation]
-    )
+    permuted = discounted_intrinsic_returns(get_source_reward_filter()(0.8), reward[:, permutation], valid[:, permutation])
     np.testing.assert_allclose(permuted, plain[:, permutation], atol=0, rtol=0)
 
 
