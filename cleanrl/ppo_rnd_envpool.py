@@ -17,6 +17,8 @@ from gym.wrappers.normalize import RunningMeanStd
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.envpool_dummy_steps import valid_transition_indices
+
 
 @dataclass
 class Args:
@@ -408,24 +410,33 @@ if __name__ == "__main__":
             ext_lastgaelam = 0
             int_lastgaelam = 0
             for t in reversed(range(args.num_steps)):
+                # EnvPool's stored dones[t] indicates a terminal observation
+                # whose action is an automatic-reset *dummy* transition. Skip
+                # its curiosity reward and preserve the intrinsic GAE carry.
+                # For intrinsic value bootstrapping, jump to the next genuine
+                # state, not the dummy observation (which may have arbitrary V).
+                dummy_step = dones[t].bool()
                 if t == args.num_steps - 1:
                     ext_nextnonterminal = 1.0 - next_done
-                    int_nextnonterminal = 1.0
                     ext_nextvalues = next_value_ext
                     int_nextvalues = next_value_int
                 else:
                     ext_nextnonterminal = 1.0 - dones[t + 1]
-                    int_nextnonterminal = 1.0
                     ext_nextvalues = ext_values[t + 1]
-                    int_nextvalues = int_values[t + 1]
+                    after_dummy_value = int_values[t + 2] if t + 2 < args.num_steps else next_value_int
+                    int_nextvalues = torch.where(dones[t + 1].bool(), after_dummy_value, int_values[t + 1])
                 ext_delta = rewards[t] + args.gamma * ext_nextvalues * ext_nextnonterminal - ext_values[t]
-                int_delta = curiosity_rewards[t] + args.int_gamma * int_nextvalues * int_nextnonterminal - int_values[t]
-                ext_advantages[t] = ext_lastgaelam = (
-                    ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam
+                int_delta = curiosity_rewards[t] + args.int_gamma * int_nextvalues - int_values[t]
+                ext_lastgaelam = torch.where(
+                    dummy_step, torch.zeros_like(ext_delta),
+                    ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam,
                 )
-                int_advantages[t] = int_lastgaelam = (
-                    int_delta + args.int_gamma * args.gae_lambda * int_nextnonterminal * int_lastgaelam
+                int_lastgaelam = torch.where(
+                    dummy_step, int_lastgaelam,
+                    int_delta + args.int_gamma * args.gae_lambda * int_lastgaelam,
                 )
+                ext_advantages[t] = ext_lastgaelam
+                int_advantages[t] = torch.where(dummy_step, torch.zeros_like(int_delta), int_lastgaelam)
             ext_returns = ext_advantages + ext_values
             int_returns = int_advantages + int_values
 
@@ -441,10 +452,12 @@ if __name__ == "__main__":
 
         b_advantages = b_int_advantages * args.int_coef + b_ext_advantages * args.ext_coef
 
-        obs_rms.update(b_obs[:, 3, :, :].reshape(-1, 1, 84, 84).cpu().numpy())
+        # Do not update curiosity normalisation with fake reset transitions.
+        valid_inds = valid_transition_indices(dones.cpu().numpy())
+        obs_rms.update(b_obs[valid_inds, 3, :, :].reshape(-1, 1, 84, 84).cpu().numpy())
 
         # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        b_inds = valid_inds
 
         rnd_next_obs = (
             (
@@ -456,7 +469,7 @@ if __name__ == "__main__":
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
+            for start in range(0, len(b_inds), args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
@@ -484,7 +497,7 @@ if __name__ == "__main__":
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std(unbiased=False) + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
