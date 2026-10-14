@@ -237,11 +237,23 @@ class RewardForwardFilter:
         self.rewems = None
         self.gamma = gamma
 
-    def update(self, rews):
+    def update(self, rews, valid_mask=None):
+        # Preserve existing behaviour for non-EnvPool callers. With a mask,
+        # do not discount or update the running filter at dummy reset slots:
+        # they are not real transitions and have no intrinsic reward.
+        if valid_mask is None:
+            if self.rewems is None:
+                self.rewems = rews
+            else:
+                self.rewems = self.rewems * self.gamma + rews
+            return self.rewems
+        rews = np.asarray(rews)
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if valid_mask.shape != rews.shape:
+            raise ValueError("RND filter valid-mask shape must match rewards")
         if self.rewems is None:
-            self.rewems = rews
-        else:
-            self.rewems = self.rewems * self.gamma + rews
+            self.rewems = np.zeros_like(rews)
+        self.rewems = np.where(valid_mask, self.rewems * self.gamma + rews, self.rewems)
         return self.rewems
 
 
@@ -390,13 +402,25 @@ if __name__ == "__main__":
                     )
                     writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
 
+        # EnvPool has a dummy reset transition after an actual done. The
+        # dummy's RND prediction error is NOT an intrinsic reward. Exclude
+        # it from the discount filter, reward RMS and all PPO objective terms.
+        valid_inds = valid_transition_indices(dones.cpu().numpy())
+        real_transition_mask = ~dones.cpu().numpy().astype(bool).T
+        curiosity_rewards.masked_fill_(dones.bool(), 0.0)
         curiosity_reward_per_env = np.array(
-            [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
+            [
+                discounted_reward.update(reward_per_step, valid_mask=valid_step)
+                for reward_per_step, valid_step in zip(
+                    curiosity_rewards.cpu().data.numpy().T, real_transition_mask
+                )
+            ]
         )
+        actual_returns = curiosity_reward_per_env[real_transition_mask]
         mean, std, count = (
-            np.mean(curiosity_reward_per_env),
-            np.std(curiosity_reward_per_env),
-            len(curiosity_reward_per_env),
+            np.mean(actual_returns),
+            np.std(actual_returns),
+            len(actual_returns),
         )
         reward_rms.update_from_moments(mean, std**2, count)
 
@@ -448,7 +472,6 @@ if __name__ == "__main__":
         b_advantages = b_int_advantages * args.int_coef + b_ext_advantages * args.ext_coef
 
         # Do not update curiosity normalisation with fake reset transitions.
-        valid_inds = valid_transition_indices(dones.cpu().numpy())
         obs_rms.update(b_obs[valid_inds, 3, :, :].reshape(-1, 1, 84, 84).cpu().numpy())
 
         # Optimizing the policy and value network
