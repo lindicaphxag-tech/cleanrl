@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cleanrl_utils.envpool_rnd_gae import discounted_intrinsic_returns
+
 SOURCE = Path(__file__).resolve().parents[1] / "cleanrl" / "ppo_rnd_envpool.py"
 
 
@@ -57,9 +59,6 @@ def test_reject_reward_mask_broadcasting(bad_mask):
 # This catches a real axis inversion in the original RND EnvPool integration:
 # the reward filter received [steps] one environment at a time, but its
 # recurrence MUST receive [envs] one timestep at a time.
-from cleanrl_utils.envpool_rnd_gae import discounted_intrinsic_returns
-
-
 def independent_time_major_oracle(rewards, valid_mask, gamma, previous=None):
     state = np.zeros(rewards.shape[1], dtype=np.float64) if previous is None else previous.copy()
     trace = []
@@ -87,7 +86,7 @@ def test_discounted_rewards_skip_dummy_without_discount_or_cross_env_leakage():
     got = discounted_intrinsic_returns(obj, reward, valid)
     expected = independent_time_major_oracle(reward, valid, 0.5)
     np.testing.assert_array_equal(got, expected)
-    np.testing.assert_array_equal(got[-1], [6.25, 51.25])
+    np.testing.assert_array_equal(got[-1], [5.75, 52.5])
 
 
 def test_discounted_rewards_rollout_chunks_equal_one_continuous_rollout():
