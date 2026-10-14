@@ -1,0 +1,47 @@
+name: Format isolated EnvPool correctness patch for upstream review
+on:
+  push:
+    branches: [fix/ppo-envpool-dummy-transition-loss-20261014]
+    paths: [.github/workflows/fork-format-envpool-protocol.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  format-owned-research-branch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install black==25.1.0 isort==5.13.2
+      - name: Format only explicitly reviewed EnvPool fix files
+        run: |
+          python -m isort --profile=black \
+            cleanrl/ppo_atari_envpool.py cleanrl/ppo_rnd_envpool.py \
+            cleanrl_utils/envpool_dummy_steps.py cleanrl_utils/envpool_rnd_gae.py \
+            tests/test_envpool_dummy_transition_mask.py \
+            tests/test_envpool_rnd_intrinsic_gae.py \
+            tests/test_envpool_rnd_reward_filter.py
+          python -m black --line-length=127 \
+            cleanrl/ppo_atari_envpool.py cleanrl/ppo_rnd_envpool.py \
+            cleanrl_utils/envpool_dummy_steps.py cleanrl_utils/envpool_rnd_gae.py \
+            tests/test_envpool_dummy_transition_mask.py \
+            tests/test_envpool_rnd_intrinsic_gae.py \
+            tests/test_envpool_rnd_reward_filter.py
+      - name: Commit a deterministic formatter-only diff to owner research branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cleanrl/ppo_atari_envpool.py cleanrl/ppo_rnd_envpool.py \
+            cleanrl_utils/envpool_dummy_steps.py cleanrl_utils/envpool_rnd_gae.py \
+            tests/test_envpool_dummy_transition_mask.py \
+            tests/test_envpool_rnd_intrinsic_gae.py \
+            tests/test_envpool_rnd_reward_filter.py
+          if ! git diff --cached --quiet; then
+            git commit -m "style(envpool): format masked PPO/RND algorithms and independent tests"
+            git push origin HEAD:fix/ppo-envpool-dummy-transition-loss-20261014
+          fi
