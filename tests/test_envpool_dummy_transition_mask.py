@@ -64,3 +64,31 @@ def test_bad_or_ambiguous_done_buffers_fail_closed(bad):
 def test_no_real_transitions_is_not_a_silent_empty_minibatch():
     with pytest.raises(ValueError, match="No real"):
         valid_transition_indices(np.ones((4, 2), dtype=bool))
+
+def test_invalid_dummy_sample_does_not_change_ppo_gradient():
+    # A real differential gradient test: the terminal reset dummy contains
+    # deliberately extreme features/rewards. A correct update must ignore it
+    # for *policy and value* losses, not merely log a filtered denominator.
+    torch = pytest.importorskip("torch")
+    done = np.array([[0], [0], [1], [0]], dtype=np.int64)
+    idx = torch.as_tensor(valid_transition_indices(done), dtype=torch.long)
+    obs = torch.tensor([[0.5, 1.0], [1.0, -2.0], [1e4, -1e4], [-.7, .3]])
+    adv = torch.tensor([0.2, 1.4, 1e3, -.4])
+    target_value = torch.tensor([.1, -1., 1e5, .2])
+    theta = torch.nn.Parameter(torch.tensor([.4, -.6]))
+    def loss(keep):
+        logits = obs[keep] @ theta
+        policy = -(logits * adv[keep]).mean()
+        value = .5 * ((logits - target_value[keep]) ** 2).mean()
+        entropy_proxy = .03 * logits.square().mean()
+        return policy + value + entropy_proxy
+    loss(idx).backward()
+    selected_grad = theta.grad.detach().clone()
+    theta.grad = None
+    # Equivalent oracle calculation using the original genuine
+    # transition rows. The fake reset transition is absent.
+    loss(torch.tensor([0, 1, 3])).backward()
+    torch.testing.assert_close(theta.grad, selected_grad, rtol=0, atol=0)
+    theta.grad = None
+    loss(torch.arange(4)).backward()
+    assert torch.linalg.norm(theta.grad - selected_grad).item() > 1e5
