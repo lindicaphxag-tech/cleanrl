@@ -5,6 +5,7 @@ across real episode terminals. The correct transition chain therefore
 skips dummy reset actions but can span a genuine terminal boundary.
 """
 
+import numpy as np
 import torch
 
 
@@ -40,3 +41,28 @@ def intrinsic_gae_skip_reset_dummy(reward, value, previous_done, bootstrap, gamm
         advantages[t] = torch.where(valid, gae, torch.zeros_like(gae))
         successor = torch.where(valid, value[t], successor)
     return advantages
+
+
+def discounted_intrinsic_returns(reward_filter, rewards, valid_mask):
+    """Advance independent per-environment discounted rewards along TIME.
+
+    Inputs are time-major [steps, envs]. EnvPool reset-dummy steps
+    neither add a reward nor consume a discount step. The filter retains
+    per-environment state across consecutive rollout chunks.
+    """
+    rewards = np.asarray(rewards)
+    valid_mask = np.asarray(valid_mask)
+    if rewards.ndim != 2 or rewards.shape != valid_mask.shape:
+        raise ValueError("Expected aligned time-major [steps, envs] arrays")
+    if not np.issubdtype(rewards.dtype, np.number) or not np.isfinite(rewards).all():
+        raise ValueError("Expected finite numeric intrinsic rewards")
+    if not np.isin(valid_mask, (False, True)).all():
+        raise ValueError("EnvPool validity mask must be Boolean")
+    if rewards.shape[0] == 0:
+        raise ValueError("Expected at least one timestep")
+    return np.stack(
+        [
+            reward_filter.update(reward_at_t, valid_mask=valid_at_t).copy()
+            for reward_at_t, valid_at_t in zip(rewards, valid_mask)
+        ]
+    )
