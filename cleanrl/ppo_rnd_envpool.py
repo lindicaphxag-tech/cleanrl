@@ -411,9 +411,7 @@ if __name__ == "__main__":
         curiosity_reward_per_env = np.array(
             [
                 discounted_reward.update(reward_per_step, valid_mask=valid_step)
-                for reward_per_step, valid_step in zip(
-                    curiosity_rewards.cpu().data.numpy().T, real_transition_mask
-                )
+                for reward_per_step, valid_step in zip(curiosity_rewards.cpu().data.numpy().T, real_transition_mask)
             ]
         )
         actual_returns = curiosity_reward_per_env[real_transition_mask]
@@ -444,7 +442,8 @@ if __name__ == "__main__":
                     ext_nextvalues = ext_values[t + 1]
                 ext_delta = rewards[t] + args.gamma * ext_nextvalues * ext_nextnonterminal - ext_values[t]
                 ext_lastgaelam = torch.where(
-                    dummy_step, torch.zeros_like(ext_delta),
+                    dummy_step,
+                    torch.zeros_like(ext_delta),
                     ext_delta + args.gamma * args.gae_lambda * ext_nextnonterminal * ext_lastgaelam,
                 )
                 ext_advantages[t] = ext_lastgaelam
@@ -453,8 +452,12 @@ if __name__ == "__main__":
             # EnvPool's *dummy* reset command is neither reward-bearing nor
             # a separate discount step. Build GAE on valid transitions only.
             int_advantages = intrinsic_gae_skip_reset_dummy(
-                curiosity_rewards, int_values, dones, next_value_int,
-                args.int_gamma, args.gae_lambda,
+                curiosity_rewards,
+                int_values,
+                dones,
+                next_value_int,
+                args.int_gamma,
+                args.gae_lambda,
             )
             ext_returns = ext_advantages + ext_values
             int_returns = int_advantages + int_values

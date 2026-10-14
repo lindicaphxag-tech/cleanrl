@@ -14,9 +14,7 @@ def test_real_terminal_transition_kept_but_reset_dummy_removed():
 
 def test_vectorized_rollout_keeps_independent_env_boundaries():
     # Time-major flattening matches PPO's obs.reshape((-1,) + ...).
-    previous = np.array(
-        [[0, 0, 0], [0, 1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.int64
-    )
+    previous = np.array([[0, 0, 0], [0, 1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.int64)
     np.testing.assert_array_equal(valid_transition_indices(previous), [0, 1, 2, 3, 5, 7, 8, 9, 10])
 
 
@@ -63,6 +61,7 @@ def test_no_real_transitions_is_not_a_silent_empty_minibatch():
     with pytest.raises(ValueError, match="No real"):
         valid_transition_indices(np.ones((4, 2), dtype=bool))
 
+
 def test_invalid_dummy_sample_does_not_change_ppo_gradient():
     # A real differential gradient test: the terminal reset dummy contains
     # deliberately extreme features/rewards. A correct update must ignore it
@@ -70,16 +69,18 @@ def test_invalid_dummy_sample_does_not_change_ppo_gradient():
     torch = pytest.importorskip("torch")
     done = np.array([[0], [0], [1], [0]], dtype=np.int64)
     idx = torch.as_tensor(valid_transition_indices(done), dtype=torch.long)
-    obs = torch.tensor([[0.5, 1.0], [1.0, -2.0], [1e4, -1e4], [-.7, .3]])
-    adv = torch.tensor([0.2, 1.4, 1e3, -.4])
-    target_value = torch.tensor([.1, -1., 1e5, .2])
-    theta = torch.nn.Parameter(torch.tensor([.4, -.6]))
+    obs = torch.tensor([[0.5, 1.0], [1.0, -2.0], [1e4, -1e4], [-0.7, 0.3]])
+    adv = torch.tensor([0.2, 1.4, 1e3, -0.4])
+    target_value = torch.tensor([0.1, -1.0, 1e5, 0.2])
+    theta = torch.nn.Parameter(torch.tensor([0.4, -0.6]))
+
     def loss(keep):
         logits = obs[keep] @ theta
         policy = -(logits * adv[keep]).mean()
-        value = .5 * ((logits - target_value[keep]) ** 2).mean()
-        entropy_proxy = .03 * logits.square().mean()
+        value = 0.5 * ((logits - target_value[keep]) ** 2).mean()
+        entropy_proxy = 0.03 * logits.square().mean()
         return policy + value + entropy_proxy
+
     loss(idx).backward()
     selected_grad = theta.grad.detach().clone()
     theta.grad = None

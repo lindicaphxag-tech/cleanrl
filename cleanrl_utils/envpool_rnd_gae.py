@@ -4,11 +4,11 @@ Unlike extrinsic reward, RND's intrinsic return remains *continuing*
 across real episode terminals. The correct transition chain therefore
 skips dummy reset actions but can span a genuine terminal boundary.
 """
+
 import torch
 
 
-def intrinsic_gae_skip_reset_dummy(reward, value, previous_done, bootstrap,
-                                   gamma, gae_lambda):
+def intrinsic_gae_skip_reset_dummy(reward, value, previous_done, bootstrap, gamma, gae_lambda):
     """Compute RND continuing-task GAE on the compressed valid transition chain.
 
     Args:
