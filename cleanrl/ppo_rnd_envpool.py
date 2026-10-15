@@ -236,10 +236,28 @@ class RewardForwardFilter:
 
     def update(self, rews):
         if self.rewems is None:
-            self.rewems = rews
+            # Do not alias the caller's rollout buffer. When tensors are on
+            # CPU, .cpu().numpy() can share its storage and reward scaling
+            # later mutates the same array in-place.
+            self.rewems = np.array(rews, copy=True)
         else:
             self.rewems = self.rewems * self.gamma + rews
         return self.rewems
+
+
+def update_intrinsic_reward_running_stats(rewards, discounted_reward, reward_rms):
+    """Update RND return statistics from time-major [steps, envs] rewards.
+
+    Process one vector of environments at each timestep, preserving the
+    return filter across rollout boundaries. Every valid time/environment
+    return is one observation for the scalar running variance.
+    """
+    discounted_returns = np.stack(
+        [discounted_reward.update(reward_per_step) for reward_per_step in rewards],
+        axis=0,
+    )
+    reward_rms.update(discounted_returns.reshape(-1))
+    return discounted_returns
 
 
 if __name__ == "__main__":
@@ -387,15 +405,9 @@ if __name__ == "__main__":
                     )
                     writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
 
-        curiosity_reward_per_env = np.array(
-            [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
-        )
-        mean, std, count = (
-            np.mean(curiosity_reward_per_env),
-            np.std(curiosity_reward_per_env),
-            len(curiosity_reward_per_env),
-        )
-        reward_rms.update_from_moments(mean, std**2, count)
+        # curiosity_rewards are already [num_steps, num_envs]. Do not
+        # transpose: the forward filter must advance over time, not env IDs.
+        update_intrinsic_reward_running_stats(curiosity_rewards.detach().cpu().numpy(), discounted_reward, reward_rms)
 
         curiosity_rewards /= np.sqrt(reward_rms.var)
 
