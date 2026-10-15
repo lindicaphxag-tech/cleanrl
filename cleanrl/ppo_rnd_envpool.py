@@ -17,6 +17,8 @@ from gym.wrappers.normalize import RunningMeanStd
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.envpool_rnd_warmup import initialize_rnd_observation_stats
+
 
 @dataclass
 class Args:
@@ -322,16 +324,15 @@ if __name__ == "__main__":
     num_updates = args.total_timesteps // args.batch_size
 
     print("Start to initialize observation normalization parameter.....")
-    next_ob = []
-    for step in range(args.num_steps * args.num_iterations_obs_norm_init):
-        acs = np.random.randint(0, envs.single_action_space.n, size=(args.num_envs,))
-        s, r, d, _ = envs.step(acs)
-        next_ob += s[:, 3, :, :].reshape([-1, 1, 84, 84]).tolist()
-
-        if len(next_ob) % (args.num_steps * args.num_envs) == 0:
-            next_ob = np.stack(next_ob)
-            obs_rms.update(next_ob)
-            next_ob = []
+    # Warmup changes the simulator state, so the cached observation from the
+    # first reset is stale. Refresh it before the policy takes an action.
+    # Normalizer samples must also exclude post-terminal reset-dummy steps.
+    warmup_initial_obs = initialize_rnd_observation_stats(
+        envs, obs_rms, args.num_envs, args.num_steps, args.num_iterations_obs_norm_init
+    )
+    if warmup_initial_obs is not None:
+        next_obs = torch.Tensor(warmup_initial_obs).to(device)
+        next_done.zero_()
     print("End to initialize...")
 
     for update in range(1, num_updates + 1):
