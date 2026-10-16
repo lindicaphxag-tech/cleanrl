@@ -256,6 +256,7 @@ if __name__ == "__main__":
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
+        early_stop = False
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -304,7 +305,16 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-            if args.target_kl is not None and approx_kl > args.target_kl:
+                # PPO's target-KL early stopping criterion is defined over the
+                # current policy update. Check it after every minibatch so a
+                # large policy change cannot spend another minibatch at an
+                # already-invalid update. The old epoch-end check could apply
+                # several extra gradient steps after crossing the threshold.
+                if args.target_kl is not None and approx_kl > args.target_kl:
+                    early_stop = True
+                    break
+
+            if early_stop:
                 break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
